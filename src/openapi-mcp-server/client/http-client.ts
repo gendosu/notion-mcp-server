@@ -46,7 +46,7 @@ const SUPPORTED_MIME_TYPES = {
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx']
-} as const
+}
 
 const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB in bytes
 
@@ -228,7 +228,7 @@ export class HttpClient {
       if (error instanceof HttpClientError) {
         throw error
       }
-      throw new HttpClientError(`Failed to read file at ${filePath}: ${error}`, 500, { filePath, error: error.message })
+      throw new HttpClientError(`Failed to read file at ${filePath}: ${error}`, 500, { filePath, error: (error as Error).message })
     }
   }
 
