@@ -5,6 +5,7 @@ import { OpenAPIToMCPConverter } from '../openapi/parser'
 import { HttpClient, HttpClientError } from '../client/http-client'
 import { OpenAPIV3 } from 'openapi-types'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { NOTION_FILE_UPLOAD_TOOLS, NotionFileUploadHandler } from './file-upload-tools'
 
 type PathItemObject = OpenAPIV3.PathItemObject & {
   get?: OpenAPIV3.OperationObject
@@ -29,6 +30,7 @@ export class MCPProxy {
   private httpClient: HttpClient
   private tools: Record<string, NewToolDefinition>
   private openApiLookup: Record<string, OpenAPIV3.OperationObject & { method: string; path: string }>
+  private fileUploadHandler: NotionFileUploadHandler
 
   constructor(name: string, openApiSpec: OpenAPIV3.Document) {
     this.server = new Server({ name, version: '1.0.0' }, { capabilities: { tools: {} } })
@@ -50,6 +52,9 @@ export class MCPProxy {
     this.tools = tools
     this.openApiLookup = openApiLookup
 
+    // Initialize file upload handler
+    this.fileUploadHandler = new NotionFileUploadHandler(this.httpClient)
+
     this.setupHandlers()
   }
 
@@ -57,6 +62,9 @@ export class MCPProxy {
     // Handle tool listing
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       const tools: Tool[] = []
+
+      // Add specialized file upload tools first
+      tools.push(...NOTION_FILE_UPLOAD_TOOLS)
 
       // Add methods as separate tools to match the MCP format
       Object.entries(this.tools).forEach(([toolName, def]) => {
@@ -78,7 +86,89 @@ export class MCPProxy {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: params } = request.params
 
-      // Find the operation in OpenAPI spec
+      // Check if this is a specialized file upload tool
+      if (name === 'notion_upload_file') {
+        try {
+          const result = await this.fileUploadHandler.handleFileUpload(params as any)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result),
+              },
+            ],
+          }
+        } catch (error) {
+          console.error('Error in file upload tool', error)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  error: (error as Error).message || 'Unknown error in file upload'
+                }),
+              },
+            ],
+          }
+        }
+      }
+
+      if (name === 'notion_get_file_info') {
+        try {
+          const result = await this.fileUploadHandler.handleGetFileInfo(params as any)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result),
+              },
+            ],
+          }
+        } catch (error) {
+          console.error('Error in get file info tool', error)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  error: (error as Error).message || 'Unknown error in get file info'
+                }),
+              },
+            ],
+          }
+        }
+      }
+
+      if (name === 'notion_validate_file') {
+        try {
+          const result = await this.fileUploadHandler.handleValidateFile(params as any)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result),
+              },
+            ],
+          }
+        } catch (error) {
+          console.error('Error in validate file tool', error)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  error: (error as Error).message || 'Unknown error in validate file'
+                }),
+              },
+            ],
+          }
+        }
+      }
+
+      // Find the operation in OpenAPI spec for regular tools
       const operation = this.findOperation(name)
       if (!operation) {
         throw new Error(`Method ${name} not found`)

@@ -1811,6 +1811,298 @@
         "security": []
       }
     },
+    "/v1/file_uploads": {
+      "post": {
+        "summary": "Create a file upload",
+        "description": "Creates a new file upload in Notion. This is the first step of the 3-stage file upload process.",
+        "operationId": "create-file-upload",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["file_name"],
+                "properties": {
+                  "file_name": {
+                    "type": "string",
+                    "description": "The name of the file to upload. Maximum 900 bytes including extension.",
+                    "maxLength": 900
+                  },
+                  "file_size": {
+                    "type": "integer",
+                    "description": "The size of the file in bytes. Maximum 5MiB (5242880 bytes) for free workspaces, 5GiB for paid workspaces.",
+                    "maximum": 5242880
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File upload created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "file_upload"
+                    },
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "description": "Unique identifier for the file upload"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["pending"],
+                      "description": "Current status of the file upload"
+                    },
+                    "file_name": {
+                      "type": "string",
+                      "description": "The name of the file"
+                    },
+                    "file_size": {
+                      "type": "integer",
+                      "description": "The size of the file in bytes"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request - file name too long or file size exceeds limit"
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Number of seconds to wait before retrying"
+              }
+            }
+          }
+        },
+        "deprecated": false,
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/file_uploads/{file_upload_id}/send": {
+      "post": {
+        "summary": "Send file content",
+        "description": "Uploads the actual file content. This is the second step of the 3-stage file upload process. Supports both single and multipart uploads.",
+        "operationId": "send-file-content",
+        "parameters": [
+          {
+            "name": "file_upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The ID of the file upload created in the first step"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The file content to upload"
+                  },
+                  "part_number": {
+                    "type": "integer",
+                    "description": "For multipart uploads: the part number (1-based index). Required for files > 20MB.",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File content uploaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "file_upload"
+                    },
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["pending", "uploading"],
+                      "description": "Updated status after content upload"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request - missing file or invalid part number"
+          },
+          "404": {
+            "description": "File upload not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false,
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/file_uploads/{file_upload_id}/complete": {
+      "post": {
+        "summary": "Complete file upload",
+        "description": "Finalizes the file upload process. This is the third and final step of the 3-stage file upload process.",
+        "operationId": "complete-file-upload",
+        "parameters": [
+          {
+            "name": "file_upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The ID of the file upload to complete"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "parts": {
+                    "type": "array",
+                    "description": "For multipart uploads: array of part information. Required if the upload was done in multiple parts.",
+                    "items": {
+                      "type": "object",
+                      "required": ["part_number"],
+                      "properties": {
+                        "part_number": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "description": "The part number"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File upload completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "file"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": ["file_upload"],
+                      "description": "The type of file object"
+                    },
+                    "file_upload": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "description": "The file upload ID that can be used to reference this file"
+                        },
+                        "url": {
+                          "type": "string",
+                          "format": "uri",
+                          "description": "Temporary URL for the uploaded file (valid for 1 hour)"
+                        },
+                        "expiry_time": {
+                          "type": "string",
+                          "format": "date-time",
+                          "description": "When the temporary URL expires"
+                        }
+                      }
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "The name of the uploaded file"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request - missing parts for multipart upload"
+          },
+          "404": {
+            "description": "File upload not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false,
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/comments": {
       "get": {
         "summary": "Retrieve comments",

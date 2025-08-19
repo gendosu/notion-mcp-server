@@ -3,6 +3,7 @@ import OpenAPIClientAxios from 'openapi-client-axios'
 import type { AxiosInstance } from 'axios'
 import FormData from 'form-data'
 import fs from 'fs'
+import path from 'path'
 import { Headers } from './polyfill-headers'
 import { isFileUploadParameter } from '../openapi/file-upload'
 
@@ -16,6 +17,38 @@ export type HttpClientResponse<T = any> = {
   status: number
   headers: Headers
 }
+
+export type FileUploadOptions = {
+  filePath: string
+  validateSize?: boolean
+  validateType?: boolean
+  maxSizeBytes?: number
+}
+
+// Notion supported file types based on API documentation
+const SUPPORTED_MIME_TYPES = {
+  // Images
+  'image/gif': ['.gif'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
+  'image/svg+xml': ['.svg'],
+  'image/webp': ['.webp'],
+  // Audio
+  'audio/aac': ['.aac'],
+  'audio/mpeg': ['.mp3'],
+  'audio/wav': ['.wav'],
+  // Video
+  'video/mp4': ['.mp4'],
+  'video/quicktime': ['.mov'],
+  'video/webm': ['.webm'],
+  // Documents
+  'application/pdf': ['.pdf'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx']
+}
+
+const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB in bytes
 
 export class HttpClientError extends Error {
   constructor(
@@ -49,42 +82,112 @@ export class HttpClient {
     this.api = this.client.init()
   }
 
-  private async prepareFileUpload(operation: OpenAPIV3.OperationObject, params: Record<string, any>): Promise<FormData | null> {
+  /**
+   * Validates a file for upload to Notion API
+   */
+  private validateFile(filePath: string, options: Partial<FileUploadOptions> = {}): void {
+    const {
+      validateSize = true,
+      validateType = true,
+      maxSizeBytes = DEFAULT_MAX_FILE_SIZE
+    } = options
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      throw new HttpClientError(`File not found: ${filePath}`, 400, null)
+    }
+
+    // Get file stats
+    const stats = fs.statSync(filePath)
+    
+    // Validate file size
+    if (validateSize && stats.size > maxSizeBytes) {
+      const sizeMB = (stats.size / 1024 / 1024).toFixed(2)
+      const maxSizeMB = (maxSizeBytes / 1024 / 1024).toFixed(2)
+      throw new HttpClientError(
+        `File size ${sizeMB}MB exceeds maximum allowed size of ${maxSizeMB}MB`,
+        400,
+        { fileSize: stats.size, maxSize: maxSizeBytes }
+      )
+    }
+
+    // Validate file type by extension
+    if (validateType) {
+      const fileExtension = path.extname(filePath).toLowerCase()
+      const isSupported = Object.values(SUPPORTED_MIME_TYPES).some(extensions =>
+        extensions.includes(fileExtension)
+      )
+      
+      if (!isSupported) {
+        const supportedExtensions = Object.values(SUPPORTED_MIME_TYPES).flat()
+        throw new HttpClientError(
+          `Unsupported file type: ${fileExtension}. Supported types: ${supportedExtensions.join(', ')}`,
+          400,
+          { extension: fileExtension, supportedExtensions }
+        )
+      }
+    }
+
+    // Validate filename length (Notion limit: 900 bytes)
+    const fileName = path.basename(filePath)
+    if (Buffer.byteLength(fileName, 'utf8') > 900) {
+      throw new HttpClientError(
+        `Filename exceeds maximum length of 900 bytes: ${fileName}`,
+        400,
+        { fileName, byteLength: Buffer.byteLength(fileName, 'utf8') }
+      )
+    }
+  }
+
+  /**
+   * Gets MIME type for a file based on its extension
+   */
+  private getMimeType(filePath: string): string {
+    const extension = path.extname(filePath).toLowerCase()
+    
+    for (const [mimeType, extensions] of Object.entries(SUPPORTED_MIME_TYPES)) {
+      if (extensions.includes(extension)) {
+        return mimeType
+      }
+    }
+    
+    return 'application/octet-stream' // fallback
+  }
+
+  /**
+   * Creates a FormData object for file uploads with enhanced validation
+   */
+  private async prepareFileUploadEnhanced(
+    operation: OpenAPIV3.OperationObject, 
+    params: Record<string, any>,
+    fileOptions?: Partial<FileUploadOptions>
+  ): Promise<FormData | null> {
     const fileParams = isFileUploadParameter(operation)
     if (fileParams.length === 0) return null
 
     const formData = new FormData()
 
-    // Handle file uploads
+    // Handle file uploads with validation
     for (const param of fileParams) {
       const filePath = params[param]
       if (!filePath) {
-        throw new Error(`File path must be provided for parameter: ${param}`)
+        throw new HttpClientError(`File path must be provided for parameter: ${param}`, 400, null)
       }
+
       switch (typeof filePath) {
         case 'string':
-          addFile(param, filePath)
+          await this.addValidatedFile(formData, param, filePath, fileOptions)
           break
         case 'object':
-          if(Array.isArray(filePath)) {
-            let fileCount = 0
-            for(const file of filePath) {
-              addFile(param, file)
-              fileCount++
+          if (Array.isArray(filePath)) {
+            for (const file of filePath) {
+              await this.addValidatedFile(formData, param, file, fileOptions)
             }
             break
           }
-          //deliberate fallthrough
+          // deliberate fallthrough
         default:
-          throw new Error(`Unsupported file type: ${typeof filePath}`)
-      }
-      function addFile(name: string, filePath: string) {
-          try {
-            const fileStream = fs.createReadStream(filePath)
-            formData.append(name, fileStream)
-        } catch (error) {
-          throw new Error(`Failed to read file at ${filePath}: ${error}`)
-        }
+          throw new HttpClientError(`Unsupported file type: ${typeof filePath}`, 400, { fileType: typeof filePath })
       }
     }
 
@@ -99,6 +202,86 @@ export class HttpClient {
   }
 
   /**
+   * Adds a validated file to FormData
+   */
+  private async addValidatedFile(
+    formData: FormData, 
+    paramName: string, 
+    filePath: string, 
+    fileOptions?: Partial<FileUploadOptions>
+  ): Promise<void> {
+    try {
+      // Validate the file
+      this.validateFile(filePath, fileOptions)
+
+      // Create file stream
+      const fileStream = fs.createReadStream(filePath)
+      const fileName = path.basename(filePath)
+      const mimeType = this.getMimeType(filePath)
+
+      // Add file to form data with proper metadata
+      formData.append(paramName, fileStream, {
+        filename: fileName,
+        contentType: mimeType
+      })
+    } catch (error) {
+      if (error instanceof HttpClientError) {
+        throw error
+      }
+      throw new HttpClientError(`Failed to read file at ${filePath}: ${error}`, 500, { filePath, error: (error as Error).message })
+    }
+  }
+
+  /**
+   * Legacy file upload method (maintained for backward compatibility)
+   */
+  private async prepareFileUpload(operation: OpenAPIV3.OperationObject, params: Record<string, any>): Promise<FormData | null> {
+    // Use the enhanced version with validation disabled for backward compatibility
+    return this.prepareFileUploadEnhanced(operation, params, { 
+      validateSize: false, 
+      validateType: false 
+    })
+  }
+
+  /**
+   * Specialized method for Notion file upload operations with full validation
+   */
+  private async prepareNotionFileUpload(
+    operation: OpenAPIV3.OperationObject, 
+    params: Record<string, any>
+  ): Promise<FormData | null> {
+    // Check if this is a Notion file upload operation
+    const isNotionFileUpload = operation.operationId?.includes('file') || 
+                              operation.operationId?.includes('upload') ||
+                              operation.summary?.toLowerCase().includes('file')
+
+    if (!isNotionFileUpload) {
+      return this.prepareFileUpload(operation, params)
+    }
+
+    // Use enhanced validation for Notion file uploads
+    return this.prepareFileUploadEnhanced(operation, params, {
+      validateSize: true,
+      validateType: true,
+      maxSizeBytes: DEFAULT_MAX_FILE_SIZE
+    })
+  }
+
+  /**
+   * Helper method to get file information for Notion API
+   */
+  getFileInfo(filePath: string): { fileName: string; fileSize: number; mimeType: string } {
+    this.validateFile(filePath)
+    
+    const stats = fs.statSync(filePath)
+    return {
+      fileName: path.basename(filePath),
+      fileSize: stats.size,
+      mimeType: this.getMimeType(filePath)
+    }
+  }
+
+  /**
    * Execute an OpenAPI operation
    */
   async executeOperation<T = any>(
@@ -108,11 +291,11 @@ export class HttpClient {
     const api = await this.api
     const operationId = operation.operationId
     if (!operationId) {
-      throw new Error('Operation ID is required')
+      throw new HttpClientError('Operation ID is required', 400, null)
     }
 
-    // Handle file uploads if present
-    const formData = await this.prepareFileUpload(operation, params)
+    // Handle file uploads with enhanced validation for Notion operations
+    const formData = await this.prepareNotionFileUpload(operation, params)
 
     // Separate parameters based on their location
     const urlParameters: Record<string, any> = {}
@@ -176,6 +359,11 @@ export class HttpClient {
         headers: responseHeaders,
       }
     } catch (error: any) {
+      // Re-throw HttpClientError from validation
+      if (error instanceof HttpClientError) {
+        throw error
+      }
+
       if (error.response) {
         console.error('Error in http client', error)
         const headers = new Headers()
@@ -183,9 +371,33 @@ export class HttpClient {
           if (value) headers.append(key, value.toString())
         })
 
-        throw new HttpClientError(error.response.statusText || 'Request failed', error.response.status, error.response.data, headers)
+        // Enhanced error handling for Notion API specific errors
+        let errorMessage = error.response.statusText || 'Request failed'
+        
+        // Handle rate limiting
+        if (error.response.status === 429) {
+          const retryAfter = error.response.headers['retry-after'] || error.response.headers['Retry-After']
+          errorMessage = `Rate limit exceeded. ${retryAfter ? `Retry after ${retryAfter} seconds.` : ''}`
+        }
+        
+        // Handle file upload specific errors
+        if (error.response.status === 413) {
+          errorMessage = 'File too large for upload'
+        }
+        
+        if (error.response.status === 415) {
+          errorMessage = 'Unsupported media type for file upload'
+        }
+
+        throw new HttpClientError(errorMessage, error.response.status, error.response.data, headers)
       }
-      throw error
+      
+      // Handle network and other errors
+      const errorMessage = error.code === 'ENOENT' ? 'File not found' : 
+                          error.code === 'EACCES' ? 'File access denied' :
+                          error.message || 'Unknown error occurred'
+      
+      throw new HttpClientError(errorMessage, 500, { originalError: error.message, code: error.code })
     }
   }
 }
